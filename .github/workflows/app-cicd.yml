@@ -1,5 +1,4 @@
-
-name: Application CI/CD
+name: Application CI-CD
 
 on:
   push:
@@ -7,7 +6,7 @@ on:
       - main
     paths:
       - "app/**"
-      - ".github/workflows/app-deploy.yml"
+      - ".github/workflows/app-cicd.yml"
 
   workflow_dispatch:
 
@@ -18,12 +17,7 @@ permissions:
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
-
-  ECR_FRONTEND_REPOSITORY: ${{ vars.ECR_FRONTEND_REPOSITORY }}
-  ECR_BACKEND_REPOSITORY: ${{ vars.ECR_BACKEND_REPOSITORY }}
-
-  ECS_CLUSTER_NAME: ${{ vars.ECS_CLUSTER_NAME }}
-  ECS_SERVICE_NAME: ${{ vars.ECS_SERVICE_NAME }}
+  ECR_REGISTRY: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com
 
 jobs:
   build-and-deploy:
@@ -31,68 +25,88 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Download source code
-      - name: Checkout repository
+      # 1. Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2. Authenticate to AWS using OIDC
+      # 2. Configure AWS credentials using GitHub OIDC
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
-      # 3. Login to Amazon ECR
+      # 3. Verify AWS identity
+      - name: Verify AWS identity
+        run: |
+          aws sts get-caller-identity
+
+      # 4. Verify Dockerfiles exist
+      - name: Check Dockerfile paths
+        run: |
+          echo "Repository root:"
+          pwd
+
+          echo "Frontend files:"
+          ls -la app/frontend
+
+          echo "Backend files:"
+          ls -la app/backend
+
+          test -f app/frontend/Dockerfile
+          test -f app/backend/Dockerfile
+
+      # 5. Login to Amazon ECR
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      # 4. Create image tags and registry address
-      - name: Set image variables
-        run: |
-          echo "ECR_REGISTRY=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com" >> $GITHUB_ENV
-          echo "IMAGE_TAG=${GITHUB_SHA}" >> $GITHUB_ENV
-
-      # 5. Build frontend Docker image
+      # 6. Build frontend Docker image
       - name: Build frontend image
         run: |
           docker build \
-            -f app/frontend/dockerfile \
-            -t $ECR_REGISTRY/$ECR_FRONTEND_REPOSITORY:$IMAGE_TAG \
-            -t $ECR_REGISTRY/$ECR_FRONTEND_REPOSITORY:latest \
+            -f app/frontend/Dockerfile \
+            -t $ECR_REGISTRY/${{ vars.ECR_FRONTEND_REPOSITORY }}:${{ github.sha }} \
+            -t $ECR_REGISTRY/${{ vars.ECR_FRONTEND_REPOSITORY }}:latest \
             app/frontend
-
-      # 6. Push frontend image to ECR
-      - name: Push frontend image
-        run: |
-          docker push $ECR_REGISTRY/$ECR_FRONTEND_REPOSITORY:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_FRONTEND_REPOSITORY:latest
 
       # 7. Build backend Docker image
       - name: Build backend image
         run: |
           docker build \
             -f app/backend/Dockerfile \
-            -t $ECR_REGISTRY/$ECR_BACKEND_REPOSITORY:$IMAGE_TAG \
-            -t $ECR_REGISTRY/$ECR_BACKEND_REPOSITORY:latest \
+            -t $ECR_REGISTRY/${{ vars.ECR_BACKEND_REPOSITORY }}:${{ github.sha }} \
+            -t $ECR_REGISTRY/${{ vars.ECR_BACKEND_REPOSITORY }}:latest \
             app/backend
 
-      # 8. Push backend image to ECR
+      # 8. Push frontend image to ECR
+      - name: Push frontend image
+        run: |
+          docker push $ECR_REGISTRY/${{ vars.ECR_FRONTEND_REPOSITORY }}:${{ github.sha }}
+          docker push $ECR_REGISTRY/${{ vars.ECR_FRONTEND_REPOSITORY }}:latest
+
+      # 9. Push backend image to ECR
       - name: Push backend image
         run: |
-          docker push $ECR_REGISTRY/$ECR_BACKEND_REPOSITORY:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_BACKEND_REPOSITORY:latest
+          docker push $ECR_REGISTRY/${{ vars.ECR_BACKEND_REPOSITORY }}:${{ github.sha }}
+          docker push $ECR_REGISTRY/${{ vars.ECR_BACKEND_REPOSITORY }}:latest
 
-      # 9. Deploy updated images to ECS
+      # 10. Trigger ECS deployment
       - name: Deploy to ECS
         run: |
           aws ecs update-service \
-            --cluster $ECS_CLUSTER_NAME \
-            --service $ECS_SERVICE_NAME \
+            --cluster ${{ vars.ECS_CLUSTER_NAME }} \
+            --service ${{ vars.ECS_SERVICE_NAME }} \
             --force-new-deployment
 
-      # 10. Wait until ECS service is stable
+      # 11. Wait for ECS service to become stable
       - name: Wait for ECS deployment
         run: |
           aws ecs wait services-stable \
-            --cluster $ECS_CLUSTER_NAME \
-            --services $ECS_SERVICE_NAME
+            --cluster ${{ vars.ECS_CLUSTER_NAME }} \
+            --services ${{ vars.ECS_SERVICE_NAME }}
+
+      # 12. Deployment confirmation
+      - name: Deployment completed
+        run: |
+          echo "Frontend and backend images pushed to ECR."
+          echo "ECS deployment completed."
