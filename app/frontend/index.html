@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>3-Tier AWS ECS App</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --border: #334155;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-hover: #0ea5e9;
+      --danger: #f87171;
+      --success: #4ade80;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 2rem 1rem;
+    }
+    .container { max-width: 720px; margin: 0 auto; }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1.5rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--border);
+    }
+    h1 { font-size: 1.5rem; font-weight: 700; }
+    .badge {
+      font-size: 0.75rem;
+      padding: 0.25rem 0.6rem;
+      border-radius: 999px;
+      background: #0f293a;
+      color: var(--accent);
+      border: 1px solid #0284c7;
+    }
+    .badge.ok { color: var(--success); border-color: #16a34a; background: #052e16; }
+    .badge.err { color: var(--danger); border-color: #dc2626; background: #450a0a; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 0.75rem;
+      padding: 1.25rem;
+      margin-bottom: 1.25rem;
+    }
+    form { display: flex; gap: 0.5rem; }
+    input[type="text"] {
+      flex: 1;
+      padding: 0.6rem 0.85rem;
+      border-radius: 0.5rem;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      font-size: 0.95rem;
+    }
+    button {
+      padding: 0.6rem 1rem;
+      border: none;
+      border-radius: 0.5rem;
+      background: var(--accent);
+      color: #0f172a;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:hover { background: var(--accent-hover); }
+    ul { list-style: none; display: flex; flex-direction: column; gap: 0.5rem; }
+    li {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.75rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+    }
+    li.done span { text-decoration: line-through; color: var(--muted); }
+    .actions { display: flex; gap: 0.4rem; }
+    .btn-sm { padding: 0.3rem 0.6rem; font-size: 0.8rem; }
+    .btn-del { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+    .btn-del:hover { background: #450a0a; }
+    .tiers {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 0.75rem;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+    .tiers strong { color: var(--text); display: block; margin-bottom: 0.2rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>3-Tier ECS Task Manager</h1>
+      <span id="status" class="badge">Checking API...</span>
+    </header>
+
+    <div class="card tiers">
+      <div><strong>Tier 1: Presentation</strong>Nginx static UI (Port 80)</div>
+      <div><strong>Tier 2: Application</strong>Flask REST API (Port 5000)</div>
+      <div><strong>Tier 3: Data</strong>SQLite relational DB</div>
+    </div>
+
+    <div class="card">
+      <form id="add-form">
+        <input id="title-input" type="text" placeholder="Add a new task..." required />
+        <button type="submit">Add</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <ul id="items-list"></ul>
+    </div>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const listEl = document.getElementById('items-list');
+    const formEl = document.getElementById('add-form');
+    const inputEl = document.getElementById('title-input');
+
+    async function checkHealth() {
+      try {
+        const res = await fetch('/api/health');
+        const data = await res.json();
+        statusEl.textContent = `API: ${data.status} | DB: ${data.database}`;
+        statusEl.className = 'badge ok';
+      } catch {
+        statusEl.textContent = 'API Unreachable';
+        statusEl.className = 'badge err';
+      }
+    }
+
+    async function loadItems() {
+      const res = await fetch('/api/items');
+      const items = await res.json();
+      listEl.innerHTML = '';
+      if (items.length === 0) {
+        listEl.innerHTML = '<li style="color: var(--muted)">No tasks yet. Add one above!</li>';
+        return;
+      }
+      for (const item of items) {
+        const li = document.createElement('li');
+        if (item.completed) li.className = 'done';
+        li.innerHTML = `
+          <span>${escapeHtml(item.title)}</span>
+          <div class="actions">
+            <button class="btn-sm" onclick="toggleItem(${item.id}, ${!item.completed})">
+              ${item.completed ? 'Undo' : 'Done'}
+            </button>
+            <button class="btn-sm btn-del" onclick="deleteItem(${item.id})">Delete</button>
+          </div>
+        `;
+        listEl.appendChild(li);
+      }
+    }
+
+    function escapeHtml(str) {
+      return str.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    formEl.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const title = inputEl.value.trim();
+      if (!title) return;
+      await fetch('/api/items', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title })
+      });
+      inputEl.value = '';
+      loadItems();
+    });
+
+    async function toggleItem(id, completed) {
+      await fetch(`/api/items/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ completed })
+      });
+      loadItems();
+    }
+
+    async function deleteItem(id) {
+      await fetch(`/api/items/${id}`, { method: 'DELETE' });
+      loadItems();
+    }
+
+    checkHealth();
+    loadItems();
+  </script>
+</body>
+</html>
