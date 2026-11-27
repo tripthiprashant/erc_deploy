@@ -1,4 +1,5 @@
-name: Application CI-CD
+
+name: Application CI/CD
 
 on:
   push:
@@ -6,7 +7,7 @@ on:
       - main
     paths:
       - "app/**"
-      - ".github/workflows/app-cicd.yml"
+      - ".github/workflows/app-deploy.yml"
 
   workflow_dispatch:
 
@@ -15,94 +16,83 @@ permissions:
   contents: read
 
 env:
-  AWS_REGION: us-east-1
-  ECR_REPOSITORY: devops-ecs-app
-  ECS_CLUSTER: devops-ecs-project-cluster
-  ECS_SERVICE: devops-ecs-project-service
-  TASK_DEFINITION_FAMILY: devops-ecs-project-task
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+
+  ECR_FRONTEND_REPOSITORY: ${{ vars.ECR_FRONTEND_REPOSITORY }}
+  ECR_BACKEND_REPOSITORY: ${{ vars.ECR_BACKEND_REPOSITORY }}
+
+  ECS_CLUSTER_NAME: ${{ vars.ECS_CLUSTER_NAME }}
+  ECS_SERVICE_NAME: ${{ vars.ECS_SERVICE_NAME }}
 
 jobs:
   build-and-deploy:
-    name: Build and Deploy to ECS
+    name: Build, Push and Deploy
     runs-on: ubuntu-latest
 
     steps:
+      # 1. Download source code
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 2. Authenticate to AWS using OIDC
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ${{ vars.AWS_REGION }}
 
+      # 3. Login to Amazon ECR
       - name: Login to Amazon ECR
-        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push Docker image
-        id: build-image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
+      # 4. Create image tags and registry address
+      - name: Set image variables
         run: |
-          IMAGE_URI=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "ECR_REGISTRY=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com" >> $GITHUB_ENV
+          echo "IMAGE_TAG=${GITHUB_SHA}" >> $GITHUB_ENV
 
-          docker build -t $IMAGE_URI ./app
-
-          docker push $IMAGE_URI
-
-          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
-
-      - name: Download current ECS task definition
+      # 5. Build frontend Docker image
+      - name: Build frontend image
         run: |
-          aws ecs describe-task-definition \
-            --task-definition "$TASK_DEFINITION_FAMILY" \
-            --query taskDefinition \
-            --output json > task-definition.json
+          docker build \
+            -f app/frontend/dockerfile \
+            -t $ECR_REGISTRY/$ECR_FRONTEND_REPOSITORY:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_FRONTEND_REPOSITORY:latest \
+            app/frontend
 
-      - name: Update task definition image
+      # 6. Push frontend image to ECR
+      - name: Push frontend image
         run: |
-          jq --arg IMAGE "$IMAGE_URI" '
-            .containerDefinitions[0].image = $IMAGE
-            |
-            del(
-              .taskDefinitionArn,
-              .revision,
-              .status,
-              .requiresAttributes,
-              .compatibilities,
-              .registeredAt,
-              .registeredBy,
-              .deregisteredAt
-            )
-          ' task-definition.json > updated-task-definition.json
+          docker push $ECR_REGISTRY/$ECR_FRONTEND_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_FRONTEND_REPOSITORY:latest
 
-      - name: Register new task definition
-        id: register-task
+      # 7. Build backend Docker image
+      - name: Build backend image
         run: |
-          TASK_DEF_ARN=$(aws ecs register-task-definition \
-            --cli-input-json file://updated-task-definition.json \
-            --query 'taskDefinition.taskDefinitionArn' \
-            --output text)
+          docker build \
+            -f app/backend/Dockerfile \
+            -t $ECR_REGISTRY/$ECR_BACKEND_REPOSITORY:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_BACKEND_REPOSITORY:latest \
+            app/backend
 
-          echo "TASK_DEF_ARN=$TASK_DEF_ARN" >> $GITHUB_ENV
+      # 8. Push backend image to ECR
+      - name: Push backend image
+        run: |
+          docker push $ECR_REGISTRY/$ECR_BACKEND_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_BACKEND_REPOSITORY:latest
 
+      # 9. Deploy updated images to ECS
       - name: Deploy to ECS
         run: |
           aws ecs update-service \
-            --cluster "$ECS_CLUSTER" \
-            --service "$ECS_SERVICE" \
-            --task-definition "$TASK_DEF_ARN" \
-            --desired-count 1
+            --cluster $ECS_CLUSTER_NAME \
+            --service $ECS_SERVICE_NAME \
+            --force-new-deployment
 
+      # 10. Wait until ECS service is stable
       - name: Wait for ECS deployment
         run: |
           aws ecs wait services-stable \
-            --cluster "$ECS_CLUSTER" \
-            --services "$ECS_SERVICE"
-
-      - name: Deployment complete
-        run: |
-          echo "Application deployed successfully!"
-          echo "Image: $IMAGE_URI"
+            --cluster $ECS_CLUSTER_NAME \
+            --services $ECS_SERVICE_NAME
